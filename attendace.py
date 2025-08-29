@@ -18,12 +18,13 @@ employees = {
     33: "Abbas"
 }
 
-CHECKIN_THRESHOLD = time(9, 2, 0)
+CHECKIN_THRESHOLD = time(9, 2, 0)       # 9:02 AM
+CHECKOUT_THRESHOLD = time(17, 0, 0)     # 5:00 PM
 
 # --- Streamlit setup ---
 st.set_page_config(page_title="Attendance Dashboard", page_icon="📊", layout="wide")
 st.title("📊 Attendance Processor")
-st.markdown("Upload your ZKTeco `.dat` (or text) export to view attendance summary.")
+st.markdown("Upload your ZKTeco `.dat` / `.txt` / `.csv` export to view attendance summary.")
 
 # --- Sidebar controls ---
 st.sidebar.header("⚙️ Settings")
@@ -105,7 +106,7 @@ def _extract_dataframe(file_bytes: bytes) -> pd.DataFrame:
         df = df[df["Timestamp"].dt.weekday < 5]
     return df
 
-def _summarize_attendance(df: pd.DataFrame, late_t: time) -> pd.DataFrame:
+def _summarize_attendance(df: pd.DataFrame, late_t: time, early_checkout_t: time) -> pd.DataFrame:
     first = df.groupby(["UserID", "Date"], as_index=False)["Timestamp"].min().rename(columns={"Timestamp": "CheckIn"})
     last = df.groupby(["UserID", "Date"], as_index=False)["Timestamp"].max().rename(columns={"Timestamp": "CheckOut"})
     merged = pd.merge(first, last, on=["UserID", "Date"], how="inner")
@@ -119,9 +120,14 @@ def _summarize_attendance(df: pd.DataFrame, late_t: time) -> pd.DataFrame:
         max(0, (t.hour - late_t.hour) * 60 + (t.minute - late_t.minute))
         for t in merged["CheckIn"]
     ]
+    merged["Early Checkout"] = merged["CheckOut"].apply(lambda t: "Yes" if t < early_checkout_t else "No")
+    merged["Minutes Early"] = [
+        max(0, (early_checkout_t.hour - t.hour) * 60 + (early_checkout_t.minute - t.minute))
+        for t in merged["CheckOut"]
+    ]
     merged = merged.sort_values(by=["UserID_int", "Date"])
     merged.drop(columns=["UserID_int"], inplace=True)
-    return merged[["UserID", "Name", "Date", "CheckIn", "CheckOut", "Status", "Minutes Late"]]
+    return merged[["UserID", "Name", "Date", "CheckIn", "CheckOut", "Status", "Minutes Late", "Early Checkout", "Minutes Early"]]
 
 def _to_styled_excel(df: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
@@ -130,23 +136,36 @@ def _to_styled_excel(df: pd.DataFrame) -> bytes:
     wb = load_workbook(bio)
     ws = wb.active
     header = [c.value for c in ws[1]]
-    try:
-        status_idx = header.index("Status") + 1
-    except ValueError:
-        status_idx = None
+
+    # --- Conditional formatting ---
     red = PatternFill(start_color="FFCDD2", end_color="FFCDD2", fill_type="solid")
-    if status_idx:
-        last_row = ws.max_row
-        last_col_letter = ws.cell(row=1, column=ws.max_column).column_letter
-        status_col_letter = ws.cell(row=1, column=status_idx).column_letter
-        rule = FormulaRule(formula=[f'${status_col_letter}2="Late"'], fill=red)
+    yellow = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
+    blue = PatternFill(start_color="BBDEFB", end_color="BBDEFB", fill_type="solid")
+
+    last_row = ws.max_row
+    last_col_letter = ws.cell(row=1, column=ws.max_column).column_letter
+
+    # Late
+    if "Status" in header:
+        idx = header.index("Status") + 1
+        col_letter = ws.cell(row=1, column=idx).column_letter
+        rule = FormulaRule(formula=[f'${col_letter}2="Late"'], fill=red)
         ws.conditional_formatting.add(f"A2:{last_col_letter}{last_row}", rule)
+    # Early Checkout
+    if "Early Checkout" in header:
+        idx = header.index("Early Checkout") + 1
+        col_letter = ws.cell(row=1, column=idx).column_letter
+        rule = FormulaRule(formula=[f'${col_letter}2="Yes"'], fill=yellow)
+        ws.conditional_formatting.add(f"A2:{last_col_letter}{last_row}", rule)
+
+    # Adjust column widths
     for col in ws.columns:
         max_len, col_letter = 0, col[0].column_letter
         for cell in col:
             v = "" if cell.value is None else str(cell.value)
             max_len = max(max_len, len(v))
         ws.column_dimensions[col_letter].width = min(max(12, max_len + 2), 40)
+
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -158,18 +177,20 @@ if uploaded:
     df_raw = _extract_dataframe(file_bytes)
     st.success(f"Parsed {len(df_raw):,} log rows successfully!")
 
-    summary = _summarize_attendance(df_raw, CHECKIN_THRESHOLD)
+    summary = _summarize_attendance(df_raw, CHECKIN_THRESHOLD, CHECKOUT_THRESHOLD)
 
     # --- Metrics ---
     total_logs = len(summary)
     total_late = (summary["Status"] == "Late").sum()
     total_on_time = (summary["Status"] == "On Time").sum()
-    
-    col1, col2, col3 = st.columns(3)
+    total_early = (summary["Early Checkout"] == "Yes").sum()
+
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("📄 Total Records", f"{total_logs}")
     col2.metric("⏰ Total Late", f"{total_late}")
     col3.metric("✅ Total On Time", f"{total_on_time}")
-    
+    col4.metric("⚠️ Early Checkout", f"{total_early}")
+
     st.markdown("---")
 
     # --- Detailed Attendance ---
@@ -184,33 +205,34 @@ if uploaded:
         file_name="attendance_marked.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-    
+
     st.markdown("---")
 
-    # --- Late & Leave Count Summary ---
-    late_counts = summary.groupby("Name")["Status"].apply(lambda x: (x == "Late").sum()).reset_index()
-    late_counts.rename(columns={"Status": "Total Lates"}, inplace=True)
-    
-    # Calculate leaves: days without check-in/check-out
-    dates_in_data = summary["Date"].unique()
-    all_data = pd.MultiIndex.from_product([employees.values(), dates_in_data], names=["Name", "Date"])
-    full_df = pd.DataFrame(index=all_data).reset_index()
-    merged_summary = pd.merge(full_df, summary[["Name", "Date"]], on=["Name","Date"], how="left", indicator=True)
-    leave_counts = merged_summary.groupby("Name")["_merge"].apply(lambda x: (x == "left_only").sum()).reset_index()
-    leave_counts.rename(columns={"_merge": "Total Leaves"}, inplace=True)
+    # --- Summary Counts ---
+    late_counts = summary.groupby("Name")["Status"].apply(lambda x: (x=="Late").sum()).reset_index().rename(columns={"Status":"Total Lates"})
+    early_counts = summary.groupby("Name")["Early Checkout"].apply(lambda x: (x=="Yes").sum()).reset_index().rename(columns={"Early Checkout":"Total Early Checkout"})
 
-    # Merge Late and Leave counts
+    # Leaves
+    dates_in_data = summary["Date"].unique()
+    all_data = pd.MultiIndex.from_product([employees.values(), dates_in_data], names=["Name","Date"])
+    full_df = pd.DataFrame(index=all_data).reset_index()
+    merged_summary = pd.merge(full_df, summary[["Name","Date"]], on=["Name","Date"], how="left", indicator=True)
+    leave_counts = merged_summary.groupby("Name")["_merge"].apply(lambda x: (x=="left_only").sum()).reset_index().rename(columns={"_merge":"Total Leaves"})
+
+    # Merge all counts
     summary_counts = pd.DataFrame({"Name": list(employees.values())})
     summary_counts = summary_counts.merge(late_counts, on="Name", how="left").fillna(0)
+    summary_counts = summary_counts.merge(early_counts, on="Name", how="left").fillna(0)
     summary_counts = summary_counts.merge(leave_counts, on="Name", how="left").fillna(0)
-    summary_counts["Total Lates"] = summary_counts["Total Lates"].astype(int)
-    summary_counts["Total Leaves"] = summary_counts["Total Leaves"].astype(int)
+    summary_counts[["Total Lates","Total Early Checkout","Total Leaves"]] = summary_counts[["Total Lates","Total Early Checkout","Total Leaves"]].astype(int)
 
-    with st.expander("📋 Total Late & Leave Count of Employees"):
-        def highlight_late_leave(row):
+    # --- Display Summary Table with Correct Highlighting ---
+    with st.expander("📋 Total Late, Early Checkout & Leave Count of Employees"):
+        def highlight_counts(row):
             return [
-                "",  # Name column: no highlight
+                "",  # Name
                 'background-color: #FFCDD2' if row["Total Lates"] > 0 else '',
+                'background-color: #FFF59D' if row["Total Early Checkout"] > 0 else '',
                 'background-color: #BBDEFB' if row["Total Leaves"] > 0 else ''
             ]
-        st.dataframe(summary_counts.style.apply(highlight_late_leave, axis=1))
+        st.dataframe(summary_counts.style.apply(highlight_counts, axis=1))
