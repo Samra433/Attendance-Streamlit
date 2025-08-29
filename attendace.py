@@ -46,8 +46,6 @@ st.title("📊 Attendance Processor (.dat → Excel)")
 
 st.markdown(
     "Upload your ZKTeco `.dat` (or text) export. "
-    "The app will extract **UserID**, match with **Name**, keep the **first (Check-In)** "
-    "and **last (Check-Out) punch per day**, and mark arrivals after **09:02** as **Late** (red)."
 )
 
 # --- Controls ---
