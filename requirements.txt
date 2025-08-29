@@ -1,3 +1,6 @@
 streamlit
 pandas
 openpyxl
+
+
+ to run use :python -m streamlit run attendace.py

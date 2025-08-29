@@ -141,8 +141,12 @@ def _summarize_attendance(df: pd.DataFrame, late_t: time) -> pd.DataFrame:
     merged["Name"] = merged["UserID_int"].map(students)
     merged = merged.dropna(subset=["Name"]).copy()
 
+    # Keep only time part for CheckIn/CheckOut
+    merged["CheckIn"] = merged["CheckIn"].dt.time
+    merged["CheckOut"] = merged["CheckOut"].dt.time
+
     # Mark status based on CheckIn
-    merged["Status"] = merged["CheckIn"].dt.time.apply(lambda t: "Late" if t > late_t else "On Time")
+    merged["Status"] = merged["CheckIn"].apply(lambda t: "Late" if t > late_t else "On Time")
     merged["Minutes Late"] = [
         max(0, (t.hour - late_t.hour) * 60 + (t.minute - late_t.minute))
         for t in merged["CheckIn"]
